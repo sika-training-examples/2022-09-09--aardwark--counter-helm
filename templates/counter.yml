@@ -1,0 +1,174 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{.Release.Name}}-read
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{.Release.Name}}-read
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{.Release.Name}}-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{.Release.Name}}-read
+subjects:
+  - kind: ServiceAccount
+    name: {{.Release.Name}}-read
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{.Release.Name}}-redis
+  labels:
+    project: counter
+    release: {{.Release.Name}}
+spec:
+  serviceName: redis
+  selector:
+    matchLabels:
+      project: counter
+      app: redis
+  template:
+    metadata:
+      labels:
+        project: counter
+        app: redis
+        release: {{.Release.Name}}
+    spec:
+      containers:
+        - name: redis
+          image: redis
+          resources:
+            requests:
+              cpu: 30m
+              memory: 50Mi
+            limits:
+              cpu: 50m
+              memory: 80Mi
+          ports:
+            - containerPort: 6379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{.Release.Name}}-redis
+  labels:
+    project: counter
+    release: {{.Release.Name}}
+spec:
+  ports:
+    - port: 6379
+  selector:
+    project: counter
+    app: redis
+    release: {{.Release.Name}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{.Release.Name}}-counter
+  labels:
+    project: counter
+    release: {{.Release.Name}}
+spec:
+  selector:
+    matchLabels:
+      project: counter
+      app: counter
+  replicas: 2
+  strategy:
+    type: {{ .Values.strategy }}
+  template:
+    metadata:
+      labels:
+        project: counter
+        app: counter
+        release: {{.Release.Name}}
+    spec:
+      serviceAccountName: {{.Release.Name}}-read
+      initContainers:
+        - name: wait-for-migrations
+          image: sikalabs/kubectl
+          command:
+            - "/bin/sh"
+            - "-c"
+            - "sleep 2 && kubectl wait --for=condition=complete --timeout=600s job/{{.Release.Name}}-{{.Release.Revision}}-migrations"
+      containers:
+        - name: counter
+          image: ondrejsika/counter
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+          resources:
+            requests:
+              cpu: 20m
+              memory: 30Mi
+            limits:
+              cpu: 50m
+              memory: 60Mi
+          env:
+            - name: REDIS
+              value: {{.Release.Name}}-redis
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{.Release.Name}}-counter
+  labels:
+    project: counter
+    release: {{.Release.Name}}
+spec:
+  ports:
+    - port: 80
+  selector:
+    project: counter
+    app: counter
+    release: {{.Release.Name}}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{.Release.Name}}
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    nginx.ingress.kubernetes.io/server-snippet: |
+      proxy_intercept_errors on;
+      error_page 503 = @custom_503;
+
+      location @custom_503 {
+        proxy_set_header X-Code $status;
+        proxy_pass http://{{.Release.Name}}-error503.{{.Release.Namespace}}.svc.cluster.local;
+      }
+  labels:
+    project: counter
+    release: {{.Release.Name}}
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - {{ .Values.host }}
+      secretName: counter-tls
+  rules:
+    - host: {{ required ".Values.host is required" .Values.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{.Release.Name}}-counter
+                port:
+                  number: 80

@@ -1,0 +1,16 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{.Release.Name}}-{{.Release.Revision}}-migrations
+spec:
+  template:
+    metadata:
+      labels:
+        release: {{.Release.Name}}
+    spec:
+      containers:
+        - name: sleep
+          image: debian:10-slim
+          command: ["/bin/sh", "-c"]
+          args: ["sleep 15"]
+      restartPolicy: Never
